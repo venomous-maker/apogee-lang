@@ -1,0 +1,333 @@
+// lang.grav — translations for Apogee apps: messages kept per language in
+// JSON files, picked by key, with placeholders and plurals.
+//
+//   lang/en/auth.json    {"failed": "These credentials do not match.", "welcome": "Welcome, :name!"}
+//   lang/es/auth.json    {"failed": "Estas credenciales no coinciden.", "welcome": "¡Bienvenido, :name!"}
+//   lang/en/cart.json    {"items": "{0} Your cart is empty|{1} One item|[2,*] :count items"}
+//   lang/es.json         {"Save changes": "Guardar cambios"}           (whole sentences as keys)
+//
+//   let t = new Translator("lang", "en", "en")   // directory, locale, fallback
+//   t.get("auth.welcome", {"name": "Ada"})       // "Welcome, Ada!"
+//   t.choice("cart.items", 3)                    // "3 items"
+//   t.get("Save changes", null, "es")            // "Guardar cambios"
+//   Lang.use(t); trans("auth.failed")             // the app's translator
+//
+// A key is "group.key" ("auth.failed" is "failed" in lang/<locale>/auth.json;
+// deeper keys are nested objects: "validation.custom.email.required"). A key
+// with no group file is looked up in lang/<locale>.json. A missing key falls
+// back to the fallback locale, and then to the key itself.
+import "std"
+
+namespace apogee {
+
+    // A language's plural forms: which form (0, 1, 2, ...) a count takes, after
+    // the rules CLDR gives (and Laravel's MessageSelector follows).
+    class PluralRules {
+        static fn index(locale: string, n0: long) -> int {
+            let n = n0 < 0 ? -n0 : n0;
+            let lang = Str.lower(locale);
+            let cut = Str.indexOf(lang, "_");
+            if (cut < 0) { cut = Str.indexOf(lang, "-"); }
+            if (cut > 0) { lang = lang[..cut]; }
+            switch (lang) {
+                // one form
+                case "az", "bo", "dz", "id", "ja", "jv", "ka", "km", "kn", "ko", "ms", "th", "tr", "vi", "zh":
+                    return 0
+                // n is 0 or 1: the first form
+                case "am", "bh", "fil", "fr", "gun", "hi", "hy", "ln", "mg", "nso", "pt_br", "ti", "wa":
+                    return n == 0 || n == 1 ? 0 : 1
+                // Russian, Ukrainian, Belarusian, Serbian, Croatian, Bosnian
+                case "be", "bs", "hr", "ru", "sh", "sr", "uk": {
+                    if (n % 10 == 1 && n % 100 != 11) { return 0; }
+                    if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) { return 1; }
+                    return 2;
+                }
+                case "cs", "sk": return n == 1 ? 0 : (n >= 2 && n <= 4 ? 1 : 2)
+                case "ga": return n == 1 ? 0 : (n == 2 ? 1 : 2)
+                case "lt": {
+                    if (n % 10 == 1 && n % 100 != 11) { return 0; }
+                    if (n % 10 >= 2 && (n % 100 < 10 || n % 100 >= 20)) { return 1; }
+                    return 2;
+                }
+                case "sl": return n % 100 == 1 ? 0 : (n % 100 == 2 ? 1 : (n % 100 == 3 || n % 100 == 4 ? 2 : 3))
+                case "mk": return n % 10 == 1 ? 0 : 1
+                case "mt": {
+                    if (n == 1) { return 0; }
+                    if (n == 0 || (n % 100 > 1 && n % 100 < 11)) { return 1; }
+                    if (n % 100 > 10 && n % 100 < 20) { return 2; }
+                    return 3;
+                }
+                case "lv": return n == 0 ? 0 : (n % 10 == 1 && n % 100 != 11 ? 1 : 2)
+                case "pl": {
+                    if (n == 1) { return 0; }
+                    if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) { return 1; }
+                    return 2;
+                }
+                case "cy": return n == 1 ? 0 : (n == 2 ? 1 : (n == 8 || n == 11 ? 2 : 3))
+                case "ro": return n == 1 ? 0 : (n == 0 || (n % 100 > 0 && n % 100 < 20) ? 1 : 2)
+                case "ar": {
+                    if (n == 0) { return 0; }
+                    if (n == 1) { return 1; }
+                    if (n == 2) { return 2; }
+                    if (n % 100 >= 3 && n % 100 <= 10) { return 3; }
+                    if (n % 100 >= 11 && n % 100 <= 99) { return 4; }
+                    return 5;
+                }
+                // English and most others: one, then many
+                default: return n == 1 ? 0 : 1
+            }
+        }
+    }
+
+    // Picks the variant of a "one|many" message for a count: explicit
+    // `{n}` / `[a,b]` / `[a,*]` ranges first, else the language's plural form.
+    class MessageSelector {
+        static fn choose(line: string, count: long, locale: string) -> string {
+            let parts = MessageSelector.split(line);
+            for (p in parts) {
+                let hit = MessageSelector.explicit(p, count);
+                if (hit != null) { return hit; }
+            }
+            let plain = new Array<string>();
+            for (p in parts) { plain.push(MessageSelector.stripRange(p)); }
+            let i = PluralRules.index(locale, count);
+            return plain[i < plain.size() ? i : plain.size() - 1];   // (fewer variants than forms: the last)
+        }
+        // The variants, split on "|" (a "|" inside {...} or [...] does not split).
+        private static fn split(line: string) -> Array<string> {
+            let out = new Array<string>();
+            let depth = 0;
+            let start = 0;
+            for (i in 0..line.length) {
+                let c = line[i] as int;
+                if (c == 123 || c == 91) { depth += 1; }
+                else if ((c == 125 || c == 93) && depth > 0) { depth -= 1; }
+                else if (c == 124 && depth == 0) { out.push(Str.trim(line[start..i])); start = i + 1; }
+            }
+            out.push(Str.trim(line[start..]));
+            return out;
+        }
+        // The text of a variant whose range takes `count`, else null.
+        private static fn explicit(part: string, count: long) -> string? {
+            if (part.length < 3) { return null; }
+            let open = part[0] as int;
+            if (open != 123 && open != 91) { return null; }
+            let close = Str.indexOf(part, open == 123 ? "}" : "]");
+            if (close < 0) { return null; }
+            let spec = Str.trim(part[1..close]);
+            let text = Str.trim(part[close + 1..]);
+            if (open == 123) {
+                for (v in Str.split(spec, ",")) { if (Integer.parseOr(Str.trim(v), -1) == count && Str.trim(v) != "") { return text; } }
+                return null;
+            }
+            let comma = Str.indexOf(spec, ",");
+            if (comma < 0) { return null; }
+            let lo = Str.trim(spec[..comma]);
+            let hi = Str.trim(spec[comma + 1..]);
+            let okLo = lo == "*" || count >= Integer.parseOr(lo, 0);
+            let okHi = hi == "*" || count <= Integer.parseOr(hi, 0);
+            return okLo && okHi ? text : null;
+        }
+        private static fn stripRange(part: string) -> string {
+            if (part.length > 0 && (part[0] == ('{' as byte) || part[0] == ('[' as byte))) {
+                let close = Str.indexOf(part, part[0] == ('{' as byte) ? "}" : "]");
+                if (close > 0) { return Str.trim(part[close + 1..]); }
+            }
+            return part;
+        }
+    }
+
+    // Messages by locale, read from JSON files once and then kept.
+    class Translator {
+        // lang/ (the directory holding <locale>/ folders and <locale>.json files).
+        public directory: string
+        public locale: string
+        public fallback: string
+        // locale -> group -> flattened key ("custom.email.required") -> message
+        private loaded: HashMap<string, HashMap<string, HashMap<string, string>>>
+        private lock: Mutex
+
+        constructor(directory: string, locale: string = "en", fallback: string = "en") {
+            self.directory = Str.endsWith(directory, "/") ? directory[..directory.length - 1] : directory;
+            self.locale = locale;
+            self.fallback = fallback;
+            self.loaded = new HashMap<string, HashMap<string, HashMap<string, string>>>();
+            self.lock = new Mutex();
+        }
+
+        // The message for `key` (see the top of the file), placeholders filled in
+        // from `replace`; the key itself when no locale has it.
+        fn get(key: string, replace: HashMap<string, any> = null, locale: string = "") -> string {
+            let line = self.lineOr(key, locale == "" ? self.locale : locale);
+            return Translator.fill(line ?? key, replace);
+        }
+        // The variant of a plural message for `count` (":count" is filled in too).
+        fn choice(key: string, count: long, replace: HashMap<string, any> = null, locale: string = "") -> string {
+            let loc = locale == "" ? self.locale : locale;
+            let line = self.lineOr(key, loc) ?? key;
+            let r = new HashMap<string, any>();
+            if (replace != null) { for ((k, v) in replace) { r.put(k, v); } }
+            if (!r.containsKey("count")) { r.put("count", count); }
+            return Translator.fill(MessageSelector.choose(line, count, loc), r);
+        }
+        // Whether `key` has a message in `locale` (or the current one), not counting the fallback.
+        fn has(key: string, locale: string = "") -> bool {
+            return self.find(key, locale == "" ? self.locale : locale) != null;
+        }
+        // Adds (or replaces) messages: `lines` keyed like files are ("failed",
+        // "custom.email.required"), in `group` ("" for sentence keys).
+        fn addLines(locale: string, group: string, lines: HashMap<string, string>) {
+            let g = self.group(locale, group);
+            self.lock.lock();
+            for ((k, v) in lines) { g.put(k, v); }
+            self.lock.unlock();
+        }
+        // The locales with a folder or a file in the directory.
+        fn locales() -> Array<string> {
+            let seen = new HashSet<string>();
+            for (name in Dir.list(self.directory)) {
+                if (Dir.exists(self.directory + "/" + name)) { seen.add(name); }
+                else if (Str.endsWith(name, ".json")) { seen.add(name[..name.length - 5]); }
+            }
+            let out = seen.toArray();
+            out.sortBy(fn(a, b) => Str.compare(a, b));
+            return out;
+        }
+
+        // ── lookup ─────────────────────────────────────────────────────────────
+        private fn lineOr(key: string, locale: string) -> string? {
+            let line = self.find(key, locale);
+            if (line == null && self.fallback != "" && self.fallback != locale) { line = self.find(key, self.fallback); }
+            return line;
+        }
+        private fn find(key: string, locale: string) -> string? {
+            let dot = Str.indexOf(key, ".");
+            if (dot > 0 && !Str.contains(key, " ")) {
+                let g = self.group(locale, key[..dot]);
+                let k = key[dot + 1..];
+                self.lock.lock();
+                let has = g.containsKey(k);
+                let v = has ? g.get(k) : "";
+                self.lock.unlock();
+                if (has) { return v; }
+            }
+            let sentences = self.group(locale, "");
+            self.lock.lock();
+            let found = sentences.containsKey(key);
+            let s = found ? sentences.get(key) : "";
+            self.lock.unlock();
+            return found ? s : null;
+        }
+        // A group's messages, read from its file the first time ("" : <locale>.json).
+        private fn group(locale: string, name: string) -> HashMap<string, string> {
+            self.lock.lock();
+            let byGroup = self.loaded.getOr(locale, null);
+            if (byGroup == null) { byGroup = new HashMap<string, HashMap<string, string>>(); self.loaded.put(locale, byGroup); }
+            let g = byGroup.getOr(name, null);
+            if (g == null) {
+                g = new HashMap<string, string>();
+                let file = name == "" ? self.directory + "/" + locale + ".json" : self.directory + "/" + locale + "/" + name + ".json";
+                let text = new File(file).readOr("");
+                if (text != "") {
+                    let j: JsonValue = null;
+                    try { j = Json.parse(text); }
+                    catch (e: ValueError) { self.lock.unlock(); throw new ValueError("${file}: " + e.message()); }
+                    Translator.flatten(j, "", g);
+                }
+                byGroup.put(name, g);
+            }
+            self.lock.unlock();
+            return g;
+        }
+        private static fn flatten(j: JsonValue, prefix: string, out: HashMap<string, string>) {
+            if (!j.isObject()) { return; }
+            for ((k, v) in j.entries()) {
+                let full = prefix == "" ? k : prefix + "." + k;
+                if (v.isObject()) { Translator.flatten(v, full, out); }
+                else if (v.isString()) { out.put(full, v.asString()); }
+                else { out.put(full, v.toJson()); }
+            }
+        }
+
+        // `:name` replaced by the value, `:Name` by it capitalized, `:NAME` by it
+        // upper-cased; longer names first, so ":names" is not cut short by ":name".
+        static fn fill(line: string, replace: HashMap<string, any>) -> string {
+            if (replace == null || replace.size() == 0 || !Str.contains(line, ":")) { return line; }
+            let keys = replace.keys();
+            keys.sortBy(fn(a, b) => b.length - a.length);
+            let out = line;
+            for (k in keys) {
+                let v = str(replace.get(k));
+                out = Str.replace(out, ":" + Str.upper(k), Str.upper(v));
+                out = Str.replace(out, ":" + Translator.capital(k), Translator.capital(v));
+                out = Str.replace(out, ":" + k, v);
+            }
+            return out;
+        }
+        private static fn capital(s: string) -> string { return s == "" ? s : Str.upper(s[..1]) + s[1..]; }
+    }
+
+    // Choosing a locale for a request.
+    class Locale {
+        // The best of `available` for an Accept-Language header ("es-MX,es;q=0.9,en;q=0.5"),
+        // matching a language without its region too ("es-MX" takes "es"); `fallback`
+        // when none fits.
+        static fn negotiate(acceptLanguage: string, available: Array<string>, fallback: string) -> string {
+            let best = fallback;
+            let bestQ = -1.0;
+            let order = 0;
+            for (item in Str.split(acceptLanguage, ",")) {
+                order += 1;
+                let parts = Str.split(Str.trim(item), ";");
+                let tag = Str.lower(Str.replace(Str.trim(parts[0]), "_", "-"));
+                if (tag == "") { continue; }
+                let q = 1.0;
+                for (i in 1..parts.size()) {
+                    let p = Str.trim(parts[i]);
+                    if (Str.startsWith(p, "q=")) { q = Float.parseOr(p[2..], 0.0); }
+                }
+                let hit = Locale.match(tag, available);
+                // ties keep the header's order (an earlier entry wins)
+                if (hit != "" && q > bestQ) { best = hit; bestQ = q; }
+            }
+            return best;
+        }
+        private static fn match(tag: string, available: Array<string>) -> string {
+            for (a in available) { if (Str.lower(Str.replace(a, "_", "-")) == tag) { return a; } }
+            let dash = Str.indexOf(tag, "-");
+            let lang = dash > 0 ? tag[..dash] : tag;
+            for (a in available) { if (Str.lower(a) == lang) { return a; } }
+            for (a in available) {
+                let al = Str.lower(Str.replace(a, "_", "-"));
+                if (Str.startsWith(al, lang + "-")) { return a; }
+            }
+            return "";
+        }
+    }
+
+    // The app's translator, as statics.
+    class Lang {
+        private static translator: Translator = null
+        static fn use(t: Translator) { Lang.translator = t; }
+        static fn instance() -> Translator {
+            let t = Lang.translator;
+            if (t == null) { throw new StateError("no translator: call Lang.use(new Translator(\"lang\", ...)) first"); }
+            return t;
+        }
+        static fn setLocale(locale: string) { Lang.instance().locale = locale; }
+        static fn locale() -> string { return Lang.instance().locale; }
+        static fn get(key: string, replace: HashMap<string, any> = null, locale: string = "") -> string {
+            return Lang.instance().get(key, replace, locale);
+        }
+        static fn choice(key: string, count: long, replace: HashMap<string, any> = null, locale: string = "") -> string {
+            return Lang.instance().choice(key, count, replace, locale);
+        }
+        static fn has(key: string) -> bool { return Lang.instance().has(key); }
+    }
+
+    // Lang.get and Lang.choice, short.
+    fn trans(key: string, replace: HashMap<string, any> = null, locale: string = "") -> string { return Lang.get(key, replace, locale); }
+    fn transChoice(key: string, count: long, replace: HashMap<string, any> = null, locale: string = "") -> string {
+        return Lang.choice(key, count, replace, locale);
+    }
+}
