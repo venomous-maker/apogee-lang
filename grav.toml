@@ -1,0 +1,6 @@
+name = "apogee-lang"
+lib = "src/lang.grav"
+grav = ">=1.10.0"
+paths = ["src"]
+
+[dependencies]
