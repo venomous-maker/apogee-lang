@@ -1,0 +1,100 @@
+// apogee-lang's tests: files and groups, nested keys, sentence keys,
+// placeholders, plurals (explicit ranges and each language's forms), the
+// fallback locale, lines added in code, locale negotiation and the facade.
+import "std"
+import "../src/lang.grav"
+use apogee.*
+
+fn langDir() -> string {
+    let d = Dir.temp() + "/apogee_lang_test_" + str(Process.pid())
+    Dir.removeAll(d)
+    Dir.create(d + "/en")
+    Dir.create(d + "/es")
+    Dir.create(d + "/ru")
+    new File(d + "/en/auth.json").write("{\"failed\": \"These credentials do not match.\", \"welcome\": \"Welcome, :name!\", \"shout\": \"HELLO :NAME, :Name\"}")
+    new File(d + "/en/validation.json").write("{\"custom\": {\"email\": {\"required\": \"We need your email.\"}}, \"max\": 10}")
+    new File(d + "/en/cart.json").write("{\"items\": \"{0} Your cart is empty|{1} One item|[2,*] :count items\", \"apples\": \"apple|apples\", \"left\": \"[1,3] a few left|[4,*] plenty\"}")
+    new File(d + "/es/auth.json").write("{\"welcome\": \"¡Bienvenido, :name!\"}")
+    new File(d + "/es.json").write("{\"Save changes\": \"Guardar cambios\"}")
+    new File(d + "/ru/cart.json").write("{\"files\": \":count файл|:count файла|:count файлов\"}")
+    return d
+}
+
+fn m(k: string, v: any) -> HashMap<string, any> {
+    let out = new HashMap<string, any>()
+    out.put(k, v)
+    return out
+}
+
+test "messages by group and nested key" {
+    let t = new Translator(langDir(), "en", "en")
+    assertEq(t.get("auth.failed"), "These credentials do not match.")
+    assertEq(t.get("validation.custom.email.required"), "We need your email.")
+    assertEq(t.get("validation.max"), "10")
+    assertEq(t.get("auth.nothing"), "auth.nothing")              // missing: the key
+    assert(t.has("auth.failed"))
+    assert(!t.has("auth.nothing"))
+}
+
+test "placeholders, capitalized and upper-cased" {
+    let t = new Translator(langDir())
+    assertEq(t.get("auth.welcome", m("name", "Ada")), "Welcome, Ada!")
+    assertEq(t.get("auth.shout", m("name", "ada")), "HELLO ADA, Ada")
+}
+
+test "another locale, sentence keys, and the fallback" {
+    let t = new Translator(langDir(), "es", "en")
+    assertEq(t.get("auth.welcome", m("name", "Ada")), "¡Bienvenido, Ada!")
+    assertEq(t.get("auth.failed"), "These credentials do not match.")     // from en
+    assertEq(t.get("Save changes"), "Guardar cambios")
+    assertEq(t.get("Save changes", null, "en"), "Save changes")
+    assert(!t.has("auth.failed"))                                          // not in es itself
+    assertEq(Str.join(t.locales(), ","), "en,es,ru")
+}
+
+test "plurals: explicit ranges and the language's forms" {
+    let t = new Translator(langDir())
+    assertEq(t.choice("cart.items", 0), "Your cart is empty")
+    assertEq(t.choice("cart.items", 1), "One item")
+    assertEq(t.choice("cart.items", 7), "7 items")
+    assertEq(t.choice("cart.apples", 1), "apple")
+    assertEq(t.choice("cart.apples", 2), "apples")
+    assertEq(t.choice("cart.left", 2), "a few left")
+    assertEq(t.choice("cart.left", 9), "plenty")
+    assertEq(t.choice("cart.files", 1, null, "ru"), "1 файл")
+    assertEq(t.choice("cart.files", 3, null, "ru"), "3 файла")
+    assertEq(t.choice("cart.files", 5, null, "ru"), "5 файлов")
+    assertEq(t.choice("cart.files", 21, null, "ru"), "21 файл")
+    assertEq(PluralRules.index("fr", 0), 0)
+    assertEq(PluralRules.index("en", 0), 1)
+    assertEq(PluralRules.index("ja", 5), 0)
+    assertEq(PluralRules.index("pl", 22), 1)
+    assertEq(PluralRules.index("ar", 11), 4)
+}
+
+test "lines added in code" {
+    let t = new Translator(langDir())
+    let lines = new HashMap<string, string>()
+    lines.put("greeting", "Hi :name")
+    t.addLines("en", "extra", lines)
+    assertEq(t.get("extra.greeting", m("name", "Bo")), "Hi Bo")
+}
+
+test "choosing a locale from Accept-Language" {
+    let avail: Array<string> = ["en", "es", "pt_BR"]
+    assertEq(Locale.negotiate("es-MX,es;q=0.9,en;q=0.5", avail, "en"), "es")
+    assertEq(Locale.negotiate("de-DE,en;q=0.5", avail, "en"), "en")
+    assertEq(Locale.negotiate("pt-BR", avail, "en"), "pt_BR")
+    assertEq(Locale.negotiate("pt", avail, "en"), "pt_BR")
+    assertEq(Locale.negotiate("fr;q=1, en;q=0.1", avail, "es"), "en")
+    assertEq(Locale.negotiate("", avail, "en"), "en")
+}
+
+test "the Lang facade and the short functions" {
+    Lang.use(new Translator(langDir(), "en", "en"))
+    assertEq(trans("auth.failed"), "These credentials do not match.")
+    assertEq(transChoice("cart.apples", 3), "apples")
+    Lang.setLocale("es")
+    assertEq(trans("auth.welcome", m("name", "Eva")), "¡Bienvenido, Eva!")
+    assertEq(Lang.locale(), "es")
+}
