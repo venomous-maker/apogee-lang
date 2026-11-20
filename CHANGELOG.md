@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.0 (2026-11-20)
+
 The first release. Needs grav 1.10.0 or newer.
 
 - `Translator`: JSON message files per locale (groups, nested keys, sentence
