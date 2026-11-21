@@ -79,19 +79,63 @@ namespace apogee {
         }
     }
 
+    // One variant of a "one|many" message: its text, and the counts it says it
+    // is for (`{1,2}`: exactly those; `[2,*]`: a range; neither: any).
+    class PluralVariant {
+        public text: string
+        public exact: Array<long> = null
+        public ranged: bool = false
+        public lo: long = 0
+        public hi: long = 0
+        public loOpen: bool = false
+        public hiOpen: bool = false
+        constructor(text: string) { self.text = text; }
+        fn takes(count: long) -> bool {
+            if (self.exact != null) { return self.exact.contains(count); }
+            if (self.ranged) { return (self.loOpen || count >= self.lo) && (self.hiOpen || count <= self.hi); }
+            return false;
+        }
+    }
+
     // Picks the variant of a "one|many" message for a count: explicit
     // `{n}` / `[a,b]` / `[a,*]` ranges first, else the language's plural form.
     class MessageSelector {
         static fn choose(line: string, count: long, locale: string) -> string {
-            let parts = MessageSelector.split(line);
-            for (p in parts) {
-                let hit = MessageSelector.explicit(p, count);
-                if (hit != null) { return hit; }
-            }
-            let plain = new Array<string>();
-            for (p in parts) { plain.push(MessageSelector.stripRange(p)); }
+            return MessageSelector.pick(MessageSelector.parse(line), count, locale);
+        }
+        // From variants already parsed (a Translator keeps them per message).
+        static fn pick(variants: Array<PluralVariant>, count: long, locale: string) -> string {
+            for (v in variants) { if (v.takes(count)) { return v.text; } }
             let i = PluralRules.index(locale, count);
-            return plain[i < plain.size() ? i : plain.size() - 1];   // (fewer variants than forms: the last)
+            return variants[i < variants.size() ? i : variants.size() - 1].text;   // (fewer variants than forms: the last)
+        }
+        // The variants of a message, with what each says about counts.
+        static fn parse(line: string) -> Array<PluralVariant> {
+            let out = new Array<PluralVariant>();
+            for (part in MessageSelector.split(line)) {
+                let open = part.length > 0 ? part[0] as int : 0;
+                let close = open == 123 ? Str.indexOf(part, "}") : (open == 91 ? Str.indexOf(part, "]") : -1);
+                if (close < 0) { out.push(new PluralVariant(part)); continue; }
+                let v = new PluralVariant(Str.trim(part[close + 1..]));
+                let spec = Str.trim(part[1..close]);
+                if (open == 123) {
+                    v.exact = new Array<long>();
+                    for (x in Str.split(spec, ",")) { if (Str.trim(x) != "") { v.exact.push(Integer.parseOr(Str.trim(x), -1)); } }
+                } else {
+                    let comma = Str.indexOf(spec, ",");
+                    if (comma >= 0) {
+                        let lo = Str.trim(spec[..comma]);
+                        let hi = Str.trim(spec[comma + 1..]);
+                        v.ranged = true;
+                        v.loOpen = lo == "*";
+                        v.hiOpen = hi == "*";
+                        v.lo = Integer.parseOr(lo, 0);
+                        v.hi = Integer.parseOr(hi, 0);
+                    }
+                }
+                out.push(v);
+            }
+            return out;
         }
         // The variants, split on "|" (a "|" inside {...} or [...] does not split).
         private static fn split(line: string) -> Array<string> {
@@ -107,34 +151,6 @@ namespace apogee {
             out.push(Str.trim(line[start..]));
             return out;
         }
-        // The text of a variant whose range takes `count`, else null.
-        private static fn explicit(part: string, count: long) -> string? {
-            if (part.length < 3) { return null; }
-            let open = part[0] as int;
-            if (open != 123 && open != 91) { return null; }
-            let close = Str.indexOf(part, open == 123 ? "}" : "]");
-            if (close < 0) { return null; }
-            let spec = Str.trim(part[1..close]);
-            let text = Str.trim(part[close + 1..]);
-            if (open == 123) {
-                for (v in Str.split(spec, ",")) { if (Integer.parseOr(Str.trim(v), -1) == count && Str.trim(v) != "") { return text; } }
-                return null;
-            }
-            let comma = Str.indexOf(spec, ",");
-            if (comma < 0) { return null; }
-            let lo = Str.trim(spec[..comma]);
-            let hi = Str.trim(spec[comma + 1..]);
-            let okLo = lo == "*" || count >= Integer.parseOr(lo, 0);
-            let okHi = hi == "*" || count <= Integer.parseOr(hi, 0);
-            return okLo && okHi ? text : null;
-        }
-        private static fn stripRange(part: string) -> string {
-            if (part.length > 0 && (part[0] == ('{' as byte) || part[0] == ('[' as byte))) {
-                let close = Str.indexOf(part, part[0] == ('{' as byte) ? "}" : "]");
-                if (close > 0) { return Str.trim(part[close + 1..]); }
-            }
-            return part;
-        }
     }
 
     // Messages by locale, read from JSON files once and then kept.
@@ -146,6 +162,8 @@ namespace apogee {
         // locale -> group -> flattened key ("custom.email.required") -> message
         private loaded: HashMap<string, HashMap<string, HashMap<string, string>>>
         private lock: Mutex
+        // plural messages, parsed the first time they are used
+        private plurals: HashMap<string, Array<PluralVariant>>
 
         constructor(directory: string, locale: string = "en", fallback: string = "en") {
             self.directory = Str.endsWith(directory, "/") ? directory[..directory.length - 1] : directory;
@@ -153,6 +171,7 @@ namespace apogee {
             self.fallback = fallback;
             self.loaded = new HashMap<string, HashMap<string, HashMap<string, string>>>();
             self.lock = new Mutex();
+            self.plurals = new HashMap<string, Array<PluralVariant>>();
         }
 
         // The message for `key` (see the top of the file), placeholders filled in
@@ -165,10 +184,14 @@ namespace apogee {
         fn choice(key: string, count: long, replace: HashMap<string, any> = null, locale: string = "") -> string {
             let loc = locale == "" ? self.locale : locale;
             let line = self.lineOr(key, loc) ?? key;
-            let r = new HashMap<string, any>();
-            if (replace != null) { for ((k, v) in replace) { r.put(k, v); } }
-            if (!r.containsKey("count")) { r.put("count", count); }
-            return Translator.fill(MessageSelector.choose(line, count, loc), r);
+            self.lock.lock();
+            let variants = self.plurals.getOr(line, null);
+            if (variants == null) {
+                variants = MessageSelector.parse(line);
+                if (self.plurals.size() < 10000) { self.plurals.put(line, variants); }
+            }
+            self.lock.unlock();
+            return Translator.fillCount(MessageSelector.pick(variants, count, loc), replace, str(count));
         }
         // Whether `key` has a message in `locale` (or the current one), not counting the fallback.
         fn has(key: string, locale: string = "") -> bool {
@@ -177,10 +200,11 @@ namespace apogee {
         // Adds (or replaces) messages: `lines` keyed like files are ("failed",
         // "custom.email.required"), in `group` ("" for sentence keys).
         fn addLines(locale: string, group: string, lines: HashMap<string, string>) {
-            let g = self.group(locale, group);
             self.lock.lock();
-            for ((k, v) in lines) { g.put(k, v); }
-            self.lock.unlock();
+            try {
+                let g = self.groupLocked(locale, group);
+                for ((k, v) in lines) { g.put(k, v); }
+            } finally { self.lock.unlock(); }
         }
         // The locales with a folder or a file in the directory.
         fn locales() -> Array<string> {
@@ -200,27 +224,24 @@ namespace apogee {
             if (line == null && self.fallback != "" && self.fallback != locale) { line = self.find(key, self.fallback); }
             return line;
         }
+        // (one lock for the whole lookup)
         private fn find(key: string, locale: string) -> string? {
             let dot = Str.indexOf(key, ".");
-            if (dot > 0 && !Str.contains(key, " ")) {
-                let g = self.group(locale, key[..dot]);
-                let k = key[dot + 1..];
-                self.lock.lock();
-                let has = g.containsKey(k);
-                let v = has ? g.get(k) : "";
-                self.lock.unlock();
-                if (has) { return v; }
-            }
-            let sentences = self.group(locale, "");
+            let grouped = dot > 0 && !Str.contains(key, " ");
             self.lock.lock();
-            let found = sentences.containsKey(key);
-            let s = found ? sentences.get(key) : "";
-            self.lock.unlock();
-            return found ? s : null;
+            try {
+                if (grouped) {
+                    let g = self.groupLocked(locale, key[..dot]);
+                    let k = key[dot + 1..];
+                    if (g.containsKey(k)) { return g.get(k); }
+                }
+                let sentences = self.groupLocked(locale, "");
+                return sentences.containsKey(key) ? sentences.get(key) : null;
+            } finally { self.lock.unlock(); }
         }
-        // A group's messages, read from its file the first time ("" : <locale>.json).
-        private fn group(locale: string, name: string) -> HashMap<string, string> {
-            self.lock.lock();
+        // A group's messages, read from its file the first time ("" : <locale>.json);
+        // the lock is held by the caller.
+        private fn groupLocked(locale: string, name: string) -> HashMap<string, string> {
             let byGroup = self.loaded.getOr(locale, null);
             if (byGroup == null) { byGroup = new HashMap<string, HashMap<string, string>>(); self.loaded.put(locale, byGroup); }
             let g = byGroup.getOr(name, null);
@@ -231,12 +252,11 @@ namespace apogee {
                 if (text != "") {
                     let j: JsonValue = null;
                     try { j = Json.parse(text); }
-                    catch (e: ValueError) { self.lock.unlock(); throw new ValueError("${file}: " + e.message()); }
+                    catch (e: ValueError) { throw new ValueError("${file}: " + e.message()); }
                     Translator.flatten(j, "", g);
                 }
                 byGroup.put(name, g);
             }
-            self.lock.unlock();
             return g;
         }
         private static fn flatten(j: JsonValue, prefix: string, out: HashMap<string, string>) {
@@ -250,19 +270,57 @@ namespace apogee {
         }
 
         // `:name` replaced by the value, `:Name` by it capitalized, `:NAME` by it
-        // upper-cased; longer names first, so ":names" is not cut short by ":name".
-        static fn fill(line: string, replace: HashMap<string, any>) -> string {
-            if (replace == null || replace.size() == 0 || !Str.contains(line, ":")) { return line; }
-            let keys = replace.keys();
-            keys.sortBy(fn(a, b) => b.length - a.length);
-            let out = line;
-            for (k in keys) {
-                let v = str(replace.get(k));
-                out = Str.replace(out, ":" + Str.upper(k), Str.upper(v));
-                out = Str.replace(out, ":" + Translator.capital(k), Translator.capital(v));
-                out = Str.replace(out, ":" + k, v);
+        // upper-cased; the longest name that matches wins (":names" with only
+        // "name" given is the value and an "s"). One pass over the line.
+        static fn fill(line: string, replace: HashMap<string, any>) -> string { return Translator.fillCount(line, replace, ""); }
+        // fill(), with `count` (when not "") standing for a :count `replace` lacks.
+        static fn fillCount(line: string, replace: HashMap<string, any>, count: string) -> string {
+            let none = replace == null || replace.size() == 0;
+            if ((none && count == "") || Str.indexOf(line, ":") < 0) { return line; }
+            let sb = new StringBuilder();
+            sb.reserve(line.length + 32);
+            let n = line.length;
+            let last = 0;
+            let i = 0;
+            while (i < n) {
+                if (line[i] != (58 as byte)) { i += 1; continue; }           // ':'
+                let j = i + 1;
+                while (j < n && Translator.namePart(line[j] as int)) { j += 1; }
+                let end = j;
+                let hit = false;
+                while (end > i + 1) {
+                    let v = Translator.valueFor(line[i + 1..end], replace, count);
+                    if (v != null) {
+                        sb.append(line[last..i]).append(v);
+                        last = end;
+                        i = end;
+                        hit = true;
+                        break;
+                    }
+                    end -= 1;
+                }
+                if (!hit) { i += 1; }
             }
-            return out;
+            if (last == 0) { return line; }
+            sb.append(line[last..]);
+            return sb.toString();
+        }
+        private static fn namePart(c: int) -> bool { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95; }
+        // What `:name` becomes: the value of "name", or of its lower-case or
+        // first-lowered form (then upper-cased or capitalized); null for none.
+        private static fn valueFor(name: string, replace: HashMap<string, any>, count: string) -> string? {
+            if (replace != null && replace.containsKey(name)) { return str(replace.get(name)); }
+            if (name == "count" && count != "") { return count; }
+            let lower = Str.lower(name);
+            if (lower != name) {
+                if (name == Str.upper(name)) {
+                    if (replace != null && replace.containsKey(lower)) { return Str.upper(str(replace.get(lower))); }
+                    if (lower == "count" && count != "") { return count; }
+                }
+                let first = Str.lower(name[..1]) + name[1..];
+                if (replace != null && replace.containsKey(first)) { return Translator.capital(str(replace.get(first))); }
+            }
+            return null;
         }
         private static fn capital(s: string) -> string { return s == "" ? s : Str.upper(s[..1]) + s[1..]; }
     }
