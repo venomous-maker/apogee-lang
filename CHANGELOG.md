@@ -6,6 +6,14 @@ compiler versions it builds with.
 
 ## Unreleased
 
+### Performance
+
+- Plural messages are parsed once and kept: `choice()` is about four times as
+  fast.
+- Placeholders are filled in one pass over the message (no sorting, no
+  string per replacement): `get()` with placeholders is twice as fast.
+- A lookup takes the lock once instead of up to three times.
+
 ## 0.1.0 (2026-11-20)
 
 The first release. Needs grav 1.10.0 or newer.
