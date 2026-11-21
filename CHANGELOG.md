@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.1 (2026-11-21)
+
 ### Performance
 
 - Plural messages are parsed once and kept: `choice()` is about four times as
