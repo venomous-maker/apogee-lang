@@ -39,6 +39,27 @@ the app is created. A translator over the app's `lang/` folder is set as `Lang` 
 
 Your own configuration wins over these defaults.
 
+
+### Each request in its own language
+
+The `locale` middleware sets each request's locale from what it asks for,
+among `app.locales` (`APP_LOCALES=en,fr,es`): a `{locale}` route parameter, else
+`?lang=`, else a `locale` cookie, else the `Accept-Language` header (by its
+weights; `es-MX` takes `es`); else `app.locale`. The response says which in
+`Content-Language`.
+
+```typescript
+router.middleware(["locale"]).group(fn(r: Router) {
+    r.get("/{locale}/welcome", fn(req: Request) -> Response { return Response.text(trans("welcome")) })
+})
+```
+
+A locale belongs to its thread: `Lang.setLocale("fr")` changes it for this
+request (or job, or command) only, and other requests keep theirs.
+`Lang.withLocale("fr", fn() { ... })` runs some code in another language (a
+mail in the recipient's) and puts it back; `Lang.setDefaultLocale` changes the
+app's default.
+
 ## Keys
 
 `"auth.failed"` is `"failed"` in `lang/<locale>/auth.json`; nested objects

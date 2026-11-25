@@ -8,6 +8,9 @@ compiler versions it builds with.
 
 Needs grav 1.12.0 or newer.
 
+- Per-request locales: `Lang.setLocale` is per thread (`setDefaultLocale` for
+  the app's), `Lang.withLocale`, and the `locale` middleware (route parameter,
+  `?lang=`, cookie, Accept-Language; `app.locales`). Needs grav 1.12.0.
 - `LangPackage`: the module connects itself to an apogee-framework app (apogee-package):
   its settings, wiring moved here from the framework.
 
