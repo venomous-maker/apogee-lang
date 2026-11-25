@@ -12,7 +12,7 @@ lang/en/cart.json    {"items": "{0} Your cart is empty|{1} One item|[2,*] :count
 lang/es.json         {"Save changes": "Guardar cambios"}
 ```
 
-```grav
+```typescript
 import "std"
 import "apogee-lang"
 use apogee.*
