@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.2.0 (2026-11-25)
+
 Needs grav 1.12.0 or newer.
 
 - Per-request locales: `Lang.setLocale` is per thread (`setDefaultLocale` for
