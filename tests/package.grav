@@ -1,0 +1,21 @@
+// LangPackage: a translator over the app lang folder.
+import "std"
+import "apogee-container"
+import "apogee-config"
+import "apogee-package"
+import "../src/all.grav"
+use apogee.*
+
+test "the package connects itself" {
+    let dir = Dir.temp() + "/lang_pkg_" + str(Process.pid())
+    Dir.create(dir + "/lang/en")
+    Packages.basePath = dir
+    let ps = Packages.discover()
+    Packages.applyDefaults(ps)
+    assertEq(Config.getString("lang.path"), dir + "/lang")
+    let c = new Container()
+    ps[0].register(new PackageContext(c, "testing", ""))
+    assertEq(Lang.locale(), "en")
+    assert(c.make::<Translator>() != null)
+    Dir.removeAll(dir)
+}
