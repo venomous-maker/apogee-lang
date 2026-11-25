@@ -1,9 +1,12 @@
 // package.grav — how apogee-lang connects itself to an app (apogee-package):
-// a translator over lang/ (app.locale, app.fallback_locale).
+// a translator over lang/ (app.locale, app.fallback_locale), and the `locale`
+// middleware choosing each request's language from app.locales.
 import "std"
 import "apogee-container"
 import "apogee-config"
 import "apogee-package"
+import "apogee-http"
+import "apogee-routing"
 import "lang.grav"
 
 namespace apogee {
@@ -13,12 +16,53 @@ namespace apogee {
         fn name() -> string { return "lang"; }
         fn defaults() -> HashMap<string, any> {
             return {"lang.path": Packages.path("lang"), "app.locale": Env.get("APP_LOCALE", "en"),
-                    "app.fallback_locale": Env.get("APP_FALLBACK_LOCALE", "en")};
+                    "app.fallback_locale": Env.get("APP_FALLBACK_LOCALE", "en"),
+                    // the locales a request may ask for (comma-separated; "" for app.locale only)
+                    "app.locales": Env.get("APP_LOCALES", "")};
         }
         fn register(app: PackageContext) {
             let t = new Translator(Config.getString("lang.path"), Config.getString("app.locale", "en"), Config.getString("app.fallback_locale", "en"));
             Lang.use(t);
             app.container.instance::<Translator>(t);
+        }
+        fn boot(app: PackageContext) {
+            let locales = PackageContext.list(Config.getString("app.locales", ""));
+            if (locales.isEmpty()) { locales.push(Config.getString("app.locale", "en")); }
+            app.make::<Router>().aliasInstance("locale", new SetLocale(locales));
+        }
+    }
+
+    // Each request in the language it asks for, among `locales`: a {locale} route
+    // parameter, else ?lang=, else a `locale` cookie, else the Accept-Language
+    // header (by its weights); else the default. The response says which, in
+    // Content-Language. The locale lasts for the request (its thread), then the
+    // default is back.
+    class SetLocale implements Middleware {
+        public locales: Array<string>
+        constructor(locales: Array<string>) { self.locales = locales; }
+        // The request's locale, or "" for the default.
+        fn choose(req: Request) -> string {
+            for (asked in [str(req.route("locale")), req.query("lang"), req.cookie("locale")]) {
+                if (asked != "" && asked != "null") {
+                    let hit = Locale.negotiate(asked, self.locales, "");
+                    if (hit != "") { return hit; }
+                }
+            }
+            let header = req.header("Accept-Language");
+            return header == "" ? "" : Locale.negotiate(header, self.locales, "");
+        }
+        fn handle(req: Request, next: fn(Request) -> Response) -> Response {
+            let chosen = self.choose(req);
+            let t = Lang.instance();
+            let before = t.threadLocale();
+            if (chosen != "") { t.setThreadLocale(chosen); }
+            try {
+                let res = next(req);
+                res.http.header("Content-Language", t.active());
+                return res;
+            } finally {
+                t.setThreadLocale(before);
+            }
         }
     }
 }
