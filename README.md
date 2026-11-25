@@ -27,6 +27,18 @@ trans("auth.failed")
 Lang.setLocale(Locale.negotiate(req.header("Accept-Language"), t.locales(), "en"))
 ```
 
+## In an apogee-framework app
+
+Importing the module is all it takes: `LangPackage` (apogee-package) connects it when
+the app is created. A translator over the app's `lang/` folder is set as `Lang` and bound in the container.
+
+| Setting | Default |
+|---|---|
+| `lang.path` | `lang`, in the app folder |
+| `app.locale`, `app.fallback_locale` | `APP_LOCALE`, `APP_FALLBACK_LOCALE` (`en`) |
+
+Your own configuration wins over these defaults.
+
 ## Keys
 
 `"auth.failed"` is `"failed"` in `lang/<locale>/auth.json`; nested objects
@@ -65,4 +77,5 @@ Arabic six, Japanese one, ...: CLDR's rules, as `PluralRules.index(locale, n)`).
 
 ```bash
 grav test tests/lang.grav
+grav test tests/package.grav
 ```
