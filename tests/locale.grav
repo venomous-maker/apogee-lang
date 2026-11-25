@@ -1,0 +1,66 @@
+// Per-request locales: each thread its own, withLocale, and the locale
+// middleware's choice (route, ?lang=, cookie, Accept-Language, default).
+import "std"
+import "apogee-http"
+import "apogee-routing"
+import "../src/all.grav"
+use apogee.*
+
+fn setup() -> string {
+    let dir = Dir.temp() + "/lang_locale_" + str(Process.pid())
+    Dir.create(dir + "/lang")
+    new File(dir + "/lang/en.json").write("{\"hello\": \"Hello\"}")
+    new File(dir + "/lang/fr.json").write("{\"hello\": \"Bonjour\"}")
+    new File(dir + "/lang/es.json").write("{\"hello\": \"Hola\"}")
+    Lang.use(new Translator(dir + "/lang", "en", "en"))
+    return dir
+}
+
+test "each thread its own locale; the default for the rest" {
+    let dir = setup()
+    let seen = new ConcurrentMap<string, string>()
+    let wg = new WaitGroup()
+    for (loc in ["fr", "es", ""]) {
+        wg.add(1)
+        Thread.spawn(fn() {
+            if (loc != "") { Lang.setLocale(loc) }
+            for (i in 0..200) { seen.put(loc == "" ? "default" : loc, Lang.get("hello")) }
+            wg.done()
+        })
+    }
+    wg.wait()
+    assertEq(seen.get("fr"), "Bonjour")
+    assertEq(seen.get("es"), "Hola")
+    assertEq(seen.get("default"), "Hello")
+    assertEq(Lang.locale(), "en")
+    Lang.withLocale("fr", fn() { assertEq(Lang.get("hello"), "Bonjour") })
+    assertEq(Lang.get("hello"), "Hello")
+    Lang.setDefaultLocale("es")
+    assertEq(Lang.get("hello"), "Hola")
+    Lang.setDefaultLocale("en")
+    Dir.removeAll(dir)
+}
+
+test "the middleware: route, ?lang=, cookie, Accept-Language, then the default" {
+    let dir = setup()
+    let m = new SetLocale(["en", "fr", "es"])
+    let say = fn(req: Request) -> string {
+        let res = m.handle(req, fn(r: Request) -> Response { return Response.text(Lang.get("hello")) })
+        return res.body() + " (" + res.getHeader("Content-Language") + ")"
+    }
+    let plain = Request.make("GET", "/", "", "")
+    assertEq(say(plain), "Hello (en)")
+    let header = Request.make("GET", "/", "", "")
+    header.http.headers.set("Accept-Language", "de-DE,de;q=0.9,es-MX;q=0.8,fr;q=0.5")
+    assertEq(say(header), "Hola (es)")
+    let query = Request.make("GET", "/?lang=fr", "", "")
+    query.http.headers.set("Accept-Language", "es")
+    assertEq(say(query), "Bonjour (fr)")
+    let cookie = Request.make("GET", "/", "", "")
+    cookie.http.headers.set("Cookie", "locale=fr")
+    assertEq(say(cookie), "Bonjour (fr)")
+    let unknown = Request.make("GET", "/?lang=xx", "", "")
+    assertEq(say(unknown), "Hello (en)")
+    assertEq(Lang.locale(), "en")                                      // (back to the default after the request)
+    Dir.removeAll(dir)
+}
