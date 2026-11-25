@@ -1,0 +1,24 @@
+// package.grav — how apogee-lang connects itself to an app (apogee-package):
+// a translator over lang/ (app.locale, app.fallback_locale).
+import "std"
+import "apogee-container"
+import "apogee-config"
+import "apogee-package"
+import "lang.grav"
+
+namespace apogee {
+
+    class LangPackage extends ApogeePackage {
+        constructor() {}
+        fn name() -> string { return "lang"; }
+        fn defaults() -> HashMap<string, any> {
+            return {"lang.path": Packages.path("lang"), "app.locale": Env.get("APP_LOCALE", "en"),
+                    "app.fallback_locale": Env.get("APP_FALLBACK_LOCALE", "en")};
+        }
+        fn register(app: PackageContext) {
+            let t = new Translator(Config.getString("lang.path"), Config.getString("app.locale", "en"), Config.getString("app.fallback_locale", "en"));
+            Lang.use(t);
+            app.container.instance::<Translator>(t);
+        }
+    }
+}
