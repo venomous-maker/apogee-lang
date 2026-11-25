@@ -157,8 +157,11 @@ namespace apogee {
     class Translator {
         // lang/ (the directory holding <locale>/ folders and <locale>.json files).
         public directory: string
+        // The default locale (each thread can use another: setLocale).
         public locale: string
         public fallback: string
+        // This thread's locale ("" for the default): a request's, set by the locale middleware.
+        private current: ThreadLocal<string> = new ThreadLocal<string>(fn() -> string { return ""; })
         // locale -> group -> flattened key ("custom.email.required") -> message
         private loaded: HashMap<string, HashMap<string, HashMap<string, string>>>
         private lock: Mutex
@@ -174,15 +177,24 @@ namespace apogee {
             self.plurals = new HashMap<string, Array<PluralVariant>>();
         }
 
+        // The locale in use on this thread: its own, else the default.
+        fn active() -> string {
+            let c = self.current.get();
+            return c == "" ? self.locale : c;
+        }
+        // This thread's locale ("" goes back to the default).
+        fn setThreadLocale(locale: string) { self.current.set(locale); }
+        fn threadLocale() -> string { return self.current.get(); }
+
         // The message for `key` (see the top of the file), placeholders filled in
         // from `replace`; the key itself when no locale has it.
         fn get(key: string, replace: HashMap<string, any> = null, locale: string = "") -> string {
-            let line = self.lineOr(key, locale == "" ? self.locale : locale);
+            let line = self.lineOr(key, locale == "" ? self.active() : locale);
             return Translator.fill(line ?? key, replace);
         }
         // The variant of a plural message for `count` (":count" is filled in too).
         fn choice(key: string, count: long, replace: HashMap<string, any> = null, locale: string = "") -> string {
-            let loc = locale == "" ? self.locale : locale;
+            let loc = locale == "" ? self.active() : locale;
             let line = self.lineOr(key, loc) ?? key;
             self.lock.lock();
             let variants = self.plurals.getOr(line, null);
@@ -195,7 +207,7 @@ namespace apogee {
         }
         // Whether `key` has a message in `locale` (or the current one), not counting the fallback.
         fn has(key: string, locale: string = "") -> bool {
-            return self.find(key, locale == "" ? self.locale : locale) != null;
+            return self.find(key, locale == "" ? self.active() : locale) != null;
         }
         // Adds (or replaces) messages: `lines` keyed like files are ("failed",
         // "custom.email.required"), in `group` ("" for sentence keys).
@@ -372,8 +384,22 @@ namespace apogee {
             if (t == null) { throw new StateError("no translator: call Lang.use(new Translator(\"lang\", ...)) first"); }
             return t;
         }
-        static fn setLocale(locale: string) { Lang.instance().locale = locale; }
-        static fn locale() -> string { return Lang.instance().locale; }
+        // The locale for this thread: a request's (the locale middleware sets it),
+        // or a job's or a command's. Other threads keep theirs.
+        static fn setLocale(locale: string) { Lang.instance().setThreadLocale(locale); }
+        // The locale in use here (this thread's, else the default).
+        static fn locale() -> string { return Lang.instance().active(); }
+        // The app's default locale, for every thread that has not set its own.
+        static fn setDefaultLocale(locale: string) { Lang.instance().locale = locale; }
+        static fn defaultLocale() -> string { return Lang.instance().locale; }
+        // Runs `body` in `locale` (a mail in the recipient's language), then puts
+        // this thread's locale back.
+        static fn withLocale(locale: string, body: fn()) {
+            let t = Lang.instance();
+            let before = t.threadLocale();
+            t.setThreadLocale(locale);
+            try { body(); } finally { t.setThreadLocale(before); }
+        }
         static fn get(key: string, replace: HashMap<string, any> = null, locale: string = "") -> string {
             return Lang.instance().get(key, replace, locale);
         }
